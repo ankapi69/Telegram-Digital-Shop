@@ -16,7 +16,9 @@ from bot.database.models import Base
 from bot.handlers import register as register_handlers
 from bot.middlewares.db import DbSessionMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.payments.registry import build_registry
 from bot.utils.logging import configure_logging
+from bot.webhook import build_webhook_app, run_webhook_server
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +48,12 @@ async def run() -> None:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    registry = build_registry(settings)
+
     dp = Dispatcher(storage=storage)
     dp["settings"] = settings
+    dp["registry"] = registry
 
     dp.update.middleware(ThrottlingMiddleware(rate=settings.throttle_rate))
     dp.update.middleware(DbSessionMiddleware(sessionmaker))
@@ -60,10 +66,19 @@ async def run() -> None:
         try:
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
-            # Windows: signal handlers aren't supported on the event loop.
             pass
 
-    log.info("Bot is starting")
+    webhook_runner = None
+    if settings.webhook_enabled:
+        app = build_webhook_app(registry, sessionmaker, bot, settings)
+        if app.router.routes():
+            webhook_runner = await run_webhook_server(
+                app, settings.webhook_host, settings.webhook_port
+            )
+        else:
+            log.info("webhook server skipped: no providers expose webhooks")
+
+    log.info("Bot is starting (providers: %s)", [p.code for p in registry.all()])
     try:
         await bot.delete_webhook(drop_pending_updates=False)
         polling = asyncio.create_task(
@@ -80,6 +95,9 @@ async def run() -> None:
             if exc is not None:
                 raise exc
     finally:
+        if webhook_runner is not None:
+            await webhook_runner.cleanup()
+        await registry.aclose()
         await dp.storage.close()
         await bot.session.close()
         await engine.dispose()

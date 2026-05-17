@@ -3,7 +3,7 @@ from aiogram.types import CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import OrderStatus
-from bot.keyboards.user import back_to_menu_kb
+from bot.keyboards.user import _fmt_amount, back_to_menu_kb
 from bot.repositories.order import list_user_orders
 from bot.repositories.product import get_product
 
@@ -38,9 +38,8 @@ async def show_orders(cb: CallbackQuery, session: AsyncSession) -> None:
         product = await get_product(session, order.product_id)
         title = product.title if product else f"товар #{order.product_id}"
         status = STATUS_LABELS.get(order.status, order.status.value)
-        lines.append(
-            f"#{order.id} • {title} • {order.price_stars}⭐ • <i>{status}</i>"
-        )
+        amount = _fmt_amount(order.amount, order.currency)
+        lines.append(f"#{order.id} • {title} • {amount} • <i>{status}</i>")
         if order.delivered_content and order.status == OrderStatus.DELIVERED:
             lines.append(f"  ↳ <code>{order.delivered_content}</code>")
 

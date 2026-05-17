@@ -14,7 +14,7 @@ from bot.keyboards.admin import (
 from bot.repositories.order import (
     get_order_with_product,
     list_awaiting_delivery,
-    mark_delivered,
+    mark_delivered_manual,
 )
 from bot.states.admin import ManualFulfill
 
@@ -56,7 +56,8 @@ async def view_order(cb: CallbackQuery, session: AsyncSession) -> None:
     await cb.message.edit_text(
         f"Заказ <b>#{order.id}</b>\n"
         f"Товар: <b>{product.title}</b>\n"
-        f"Цена: <b>{order.price_stars}⭐</b>\n"
+        f"Сумма: <b>{order.amount} {order.currency}</b>\n"
+        f"Способ: {order.provider}\n"
         f"Покупатель: <code>{order.user_id}</code>\n"
         f"Статус: <i>{order.status.value}</i>",
         reply_markup=order_fulfill_kb(order.id),
@@ -124,7 +125,7 @@ async def fulfill_send(
         )
         return
 
-    await mark_delivered(session, order, content)
+    await mark_delivered_manual(session, order, content)
     await state.clear()
     await message.answer(
         f"✅ Заказ #{order.id} выдан.", reply_markup=admin_menu_kb()

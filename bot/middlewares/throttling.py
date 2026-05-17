@@ -31,6 +31,20 @@ def _user_id_from_update(update: Update) -> int | None:
     return None
 
 
+def _is_payment_update(update: Update) -> bool:
+    """Payment-related updates must never be throttled.
+
+    ``pre_checkout_query`` has a hard 10-second response window from
+    Telegram; ``successful_payment`` is delivered once and there is no
+    retry — if we drop it the order is lost.
+    """
+    if update.pre_checkout_query is not None:
+        return True
+    if update.message is not None and update.message.successful_payment is not None:
+        return True
+    return False
+
+
 class ThrottlingMiddleware(BaseMiddleware):
     """In-memory per-user rate limit. Silently drops too-fast updates.
 
@@ -61,6 +75,8 @@ class ThrottlingMiddleware(BaseMiddleware):
     ) -> Any:
         user_id: int | None = None
         if isinstance(event, Update):
+            if _is_payment_update(event):
+                return await handler(event, data)
             user_id = _user_id_from_update(event)
         if user_id is not None and self._hit(user_id):
             return None

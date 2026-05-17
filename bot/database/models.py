@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -11,8 +12,10 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -53,11 +56,18 @@ class Product(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     delivery_type: Mapped[DeliveryType] = mapped_column(
         Enum(DeliveryType, native_enum=False, length=16), nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Per-currency price columns. ``None`` means "this product is not
+    # sold for this currency", and the corresponding provider hides it
+    # from the buyer.  Add a new column here when wiring a new currency.
+    price_stars: Mapped[int | None] = mapped_column(Integer)
+    price_rub: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    price_usdt: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -102,15 +112,26 @@ class Order(Base):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id"), nullable=False, index=True
     )
-    price_stars: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(128))
+    payment_url: Mapped[str | None] = mapped_column(Text)
+
+    currency: Mapped[str] = mapped_column(String(16), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, native_enum=False, length=32), nullable=False
     )
-    payment_charge_id: Mapped[str | None] = mapped_column(String(128), unique=True)
     delivered_content: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (Index("ix_orders_status", "status"),)
+    __table_args__ = (
+        Index("ix_orders_status", "status"),
+        UniqueConstraint(
+            "provider", "external_id", name="uq_orders_provider_external"
+        ),
+    )

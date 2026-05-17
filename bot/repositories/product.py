@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,13 +11,11 @@ async def create_product(
     *,
     title: str,
     description: str,
-    price_stars: int,
     delivery_type: DeliveryType,
 ) -> Product:
     product = Product(
         title=title,
         description=description,
-        price_stars=price_stars,
         delivery_type=delivery_type,
     )
     session.add(product)
@@ -49,12 +49,25 @@ async def count_available_stock(session: AsyncSession, product_id: int) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
+# Whitelisted writable columns to avoid arbitrary attribute updates.
+_EDITABLE_FIELDS = {
+    "title",
+    "description",
+    "is_active",
+    "price_stars",
+    "price_rub",
+    "price_usdt",
+}
+
+
 async def update_product_field(
     session: AsyncSession,
     product_id: int,
     field: str,
     value: object,
 ) -> Product | None:
+    if field not in _EDITABLE_FIELDS:
+        raise ValueError(f"Field {field!r} is not editable")
     product = await session.get(Product, product_id)
     if product is None:
         return None
@@ -69,3 +82,21 @@ async def delete_product(session: AsyncSession, product_id: int) -> bool:
         return False
     await session.delete(product)
     return True
+
+
+def has_any_price(product: Product) -> bool:
+    return any(
+        v is not None
+        for v in (product.price_stars, product.price_rub, product.price_usdt)
+    )
+
+
+def coerce_decimal(raw: str) -> Decimal | None:
+    """Parse a user-entered decimal, or ``None`` if invalid/negative."""
+    try:
+        value = Decimal(raw.replace(",", ".").strip())
+    except (ArithmeticError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value

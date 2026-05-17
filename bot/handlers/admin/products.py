@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -11,10 +13,12 @@ from bot.keyboards.admin import (
     products_list_kb,
 )
 from bot.repositories.product import (
+    coerce_decimal,
     count_available_stock,
     create_product,
     delete_product,
     get_product,
+    has_any_price,
     list_all_products,
     update_product_field,
 )
@@ -25,6 +29,8 @@ router = Router(name="admin-products")
 MAX_TITLE = 128
 MAX_DESCRIPTION = 4000
 MAX_PRICE_STARS = 1_000_000
+MAX_PRICE_FIAT = Decimal("1000000")  # rubles
+MAX_PRICE_CRYPTO = Decimal("1000000")  # USDT
 
 
 def _product_card(product, available: int | None) -> str:
@@ -35,12 +41,23 @@ def _product_card(product, available: int | None) -> str:
     stock_line = (
         f"\n📦 В наличии: <b>{available}</b>" if available is not None else ""
     )
+    price_lines = []
+    if product.price_stars is not None:
+        price_lines.append(f"  • ⭐ Stars: <b>{product.price_stars}</b>")
+    if product.price_rub is not None:
+        price_lines.append(f"  • ₽ RUB: <b>{product.price_rub.normalize():f}</b>")
+    if product.price_usdt is not None:
+        price_lines.append(f"  • ₮ USDT: <b>{product.price_usdt.normalize():f}</b>")
+    if not price_lines:
+        price_lines.append("  ⚠️ цены не заданы — товар нельзя купить")
+
     return (
         f"<b>{product.title}</b>\n"
         f"#{product.id} • {dtype} • {status}\n\n"
         f"{product.description or '—'}\n\n"
-        f"💰 Цена: <b>{product.price_stars}⭐</b>"
-        f"{stock_line}"
+        "💰 Цены:\n"
+        + "\n".join(price_lines)
+        + stock_line
     )
 
 
@@ -95,6 +112,11 @@ async def toggle_active(cb: CallbackQuery, session: AsyncSession) -> None:
     if product is None:
         await cb.answer("Не найдено", show_alert=True)
         return
+    if not product.is_active and not has_any_price(product):
+        await cb.answer(
+            "Сначала задайте хотя бы одну цену, потом публикуйте.", show_alert=True
+        )
+        return
     product.is_active = not product.is_active
     await session.flush()
     available = (
@@ -139,9 +161,7 @@ async def new_product(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer()
         return
     await state.set_state(ProductCreate.title)
-    await cb.message.edit_text(
-        "Введите название товара (до 128 символов):"
-    )
+    await cb.message.edit_text("Введите название товара (до 128 символов):")
     await cb.answer()
 
 
@@ -149,11 +169,13 @@ async def new_product(cb: CallbackQuery, state: FSMContext) -> None:
 async def create_title(message: Message, state: FSMContext) -> None:
     title = (message.text or "").strip()
     if not title or len(title) > MAX_TITLE:
-        await message.answer(f"Название должно быть от 1 до {MAX_TITLE} символов.")
+        await message.answer(f"От 1 до {MAX_TITLE} символов.")
         return
     await state.update_data(title=title)
     await state.set_state(ProductCreate.description)
-    await message.answer("Введите описание (до 4000 символов, можно «-» если без описания):")
+    await message.answer(
+        "Введите описание (до 4000 символов, «-» для пустого):"
+    )
 
 
 @router.message(ProductCreate.description, F.text)
@@ -162,24 +184,9 @@ async def create_description(message: Message, state: FSMContext) -> None:
     if desc == "-":
         desc = ""
     if len(desc) > MAX_DESCRIPTION:
-        await message.answer(f"Слишком длинно. Максимум {MAX_DESCRIPTION} символов.")
+        await message.answer(f"Максимум {MAX_DESCRIPTION} символов.")
         return
     await state.update_data(description=desc)
-    await state.set_state(ProductCreate.price)
-    await message.answer("Введите цену в Telegram Stars (целое число, например 50):")
-
-
-@router.message(ProductCreate.price, F.text)
-async def create_price(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("Нужно целое число больше нуля.")
-        return
-    price = int(raw)
-    if price <= 0 or price > MAX_PRICE_STARS:
-        await message.answer(f"Цена должна быть от 1 до {MAX_PRICE_STARS}.")
-        return
-    await state.update_data(price=price)
     await state.set_state(ProductCreate.delivery_type)
     await message.answer("Выберите тип выдачи:", reply_markup=delivery_type_kb())
 
@@ -202,13 +209,13 @@ async def create_delivery(
         session,
         title=data["title"],
         description=data.get("description", ""),
-        price_stars=int(data["price"]),
         delivery_type=dtype,
     )
     await state.clear()
     available = 0 if dtype == DeliveryType.AUTO else None
     await cb.message.edit_text(
-        "✅ Товар создан.\n\n" + _product_card(product, available),
+        "✅ Товар создан.  Теперь задайте хотя бы одну цену.\n\n"
+        + _product_card(product, available),
         reply_markup=product_admin_kb(product),
     )
     await cb.answer()
@@ -218,9 +225,23 @@ async def create_delivery(
 
 
 _EDIT_PROMPTS = {
-    "title": ("waiting_title", "Введите новое название:"),
-    "description": ("waiting_description", "Введите новое описание («-» чтобы очистить):"),
-    "price": ("waiting_price", "Введите новую цену (в Stars):"),
+    "title": (ProductEdit.waiting_title, "Введите новое название:"),
+    "description": (
+        ProductEdit.waiting_description,
+        "Введите новое описание («-» чтобы очистить):",
+    ),
+    "price_stars": (
+        ProductEdit.waiting_price_stars,
+        "Введите цену в Telegram Stars (целое число, «-» чтобы убрать):",
+    ),
+    "price_rub": (
+        ProductEdit.waiting_price_rub,
+        "Введите цену в рублях (например 100 или 99.50, «-» чтобы убрать):",
+    ),
+    "price_usdt": (
+        ProductEdit.waiting_price_usdt,
+        "Введите цену в USDT (например 5.5, «-» чтобы убрать):",
+    ),
 }
 
 
@@ -233,8 +254,8 @@ async def edit_start(cb: CallbackQuery, state: FSMContext) -> None:
     if field not in _EDIT_PROMPTS:
         await cb.answer("Нельзя редактировать это поле", show_alert=True)
         return
-    state_name, prompt = _EDIT_PROMPTS[field]
-    await state.set_state(getattr(ProductEdit, state_name))
+    target_state, prompt = _EDIT_PROMPTS[field]
+    await state.set_state(target_state)
     await state.update_data(product_id=int(product_id_raw))
     await cb.message.edit_text(prompt)
     await cb.answer()
@@ -264,19 +285,60 @@ async def edit_description(
     await _apply_edit(message, state, session, "description", desc)
 
 
-@router.message(ProductEdit.waiting_price, F.text)
-async def edit_price(
+@router.message(ProductEdit.waiting_price_stars, F.text)
+async def edit_price_stars(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
     raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("Нужно целое число.")
+    if raw == "-":
+        await _apply_edit(message, state, session, "price_stars", None)
         return
-    price = int(raw)
-    if price <= 0 or price > MAX_PRICE_STARS:
+    if not raw.isdigit():
+        await message.answer("Нужно целое число больше нуля или «-».")
+        return
+    value = int(raw)
+    if value <= 0 or value > MAX_PRICE_STARS:
         await message.answer(f"От 1 до {MAX_PRICE_STARS}.")
         return
-    await _apply_edit(message, state, session, "price_stars", price)
+    await _apply_edit(message, state, session, "price_stars", value)
+
+
+@router.message(ProductEdit.waiting_price_rub, F.text)
+async def edit_price_rub(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    await _edit_decimal(
+        message, state, session, "price_rub", MAX_PRICE_FIAT
+    )
+
+
+@router.message(ProductEdit.waiting_price_usdt, F.text)
+async def edit_price_usdt(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    await _edit_decimal(
+        message, state, session, "price_usdt", MAX_PRICE_CRYPTO
+    )
+
+
+async def _edit_decimal(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    field: str,
+    max_value: Decimal,
+) -> None:
+    raw = (message.text or "").strip()
+    if raw == "-":
+        await _apply_edit(message, state, session, field, None)
+        return
+    value = coerce_decimal(raw)
+    if value is None or value > max_value:
+        await message.answer(
+            f"Нужно положительное число до {max_value} или «-», чтобы убрать."
+        )
+        return
+    await _apply_edit(message, state, session, field, value)
 
 
 async def _apply_edit(

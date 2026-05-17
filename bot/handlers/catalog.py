@@ -4,7 +4,8 @@ from aiogram.utils.markdown import hbold
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import DeliveryType
-from bot.keyboards.user import catalog_kb, product_kb
+from bot.keyboards.user import _fmt_amount, catalog_kb, product_kb
+from bot.payments.registry import PaymentRegistry
 from bot.repositories.product import (
     count_available_stock,
     get_product,
@@ -34,7 +35,9 @@ async def show_catalog(cb: CallbackQuery, session: AsyncSession) -> None:
 
 
 @router.callback_query(F.data.startswith("product:"))
-async def show_product(cb: CallbackQuery, session: AsyncSession) -> None:
+async def show_product(
+    cb: CallbackQuery, session: AsyncSession, registry: PaymentRegistry
+) -> None:
     if cb.message is None or cb.data is None:
         await cb.answer()
         return
@@ -44,20 +47,36 @@ async def show_product(cb: CallbackQuery, session: AsyncSession) -> None:
         await cb.answer("Товар недоступен", show_alert=True)
         return
 
-    available_line = ""
-    can_buy = True
+    providers = registry.for_product(product)
+
+    extra_lines: list[str] = []
+    can_buy = bool(providers)
     if product.delivery_type == DeliveryType.AUTO:
         available = await count_available_stock(session, product.id)
-        available_line = f"\n📦 В наличии: <b>{available}</b>"
-        can_buy = available > 0
+        extra_lines.append(f"📦 В наличии: <b>{available}</b>")
+        if available <= 0:
+            can_buy = False
     else:
-        available_line = "\n📨 Выдаётся вручную после оплаты"
+        extra_lines.append("📨 Выдаётся вручную после оплаты")
+
+    price_lines = [
+        f"  • {p.display_name}: {_fmt_amount(p.price_for(product), p.currency)}"
+        for p in providers
+        if p.price_for(product) is not None
+    ]
+    if price_lines:
+        extra_lines.append("💰 Способы оплаты:")
+        extra_lines.extend(price_lines)
+    else:
+        extra_lines.append("⛔️ Нет настроенных способов оплаты")
+        can_buy = False
 
     text = (
         f"{hbold(product.title)}\n\n"
         f"{product.description or '—'}\n\n"
-        f"💰 Цена: <b>{product.price_stars}⭐</b>"
-        f"{available_line}"
+        + "\n".join(extra_lines)
     )
-    await cb.message.edit_text(text, reply_markup=product_kb(product.id, can_buy))
+    await cb.message.edit_text(
+        text, reply_markup=product_kb(product, providers, can_buy)
+    )
     await cb.answer()

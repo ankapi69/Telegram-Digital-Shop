@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,12 +12,16 @@ async def create_order(
     *,
     user_id: int,
     product_id: int,
-    price_stars: int,
+    provider: str,
+    currency: str,
+    amount: Decimal,
 ) -> Order:
     order = Order(
         user_id=user_id,
         product_id=product_id,
-        price_stars=price_stars,
+        provider=provider,
+        currency=currency,
+        amount=amount,
         status=OrderStatus.PENDING_PAYMENT,
     )
     session.add(order)
@@ -59,7 +64,17 @@ async def list_user_orders(session: AsyncSession, user_id: int) -> list[Order]:
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def mark_delivered(
+async def find_pending_by_external(
+    session: AsyncSession, provider: str, external_id: str
+) -> Order | None:
+    stmt = select(Order).where(
+        Order.provider == provider,
+        Order.external_id == external_id,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def mark_delivered_manual(
     session: AsyncSession, order: Order, content: str
 ) -> None:
     order.status = OrderStatus.DELIVERED
@@ -67,8 +82,12 @@ async def mark_delivered(
     order.delivered_at = datetime.now(timezone.utc)
 
 
-async def mark_awaiting_delivery(
-    session: AsyncSession, order: Order, charge_id: str | None
+async def set_invoice_data(
+    session: AsyncSession,
+    order: Order,
+    external_id: str,
+    payment_url: str | None,
 ) -> None:
-    order.status = OrderStatus.AWAITING_DELIVERY
-    order.payment_charge_id = charge_id
+    order.external_id = external_id
+    order.payment_url = payment_url
+    await session.flush()
