@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from decimal import Decimal
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.database.models import DeliveryType
 from bot.keyboards.admin import (
     admin_menu_kb,
+    category_pick_kb,
     delivery_type_kb,
     product_admin_kb,
     products_list_kb,
 )
+from bot.repositories import category as cat_repo
 from bot.repositories.product import (
     coerce_decimal,
     count_available_stock,
@@ -22,6 +26,7 @@ from bot.repositories.product import (
     list_all_products,
     update_product_field,
 )
+from bot.services.catalog import CatalogService
 from bot.states.admin import ProductCreate, ProductEdit
 
 router = Router(name="admin-products")
@@ -29,39 +34,30 @@ router = Router(name="admin-products")
 MAX_TITLE = 128
 MAX_DESCRIPTION = 4000
 MAX_PRICE_STARS = 1_000_000
-MAX_PRICE_FIAT = Decimal("1000000")  # rubles
-MAX_PRICE_CRYPTO = Decimal("1000000")  # USDT
+MAX_PRICE_FIAT = Decimal("1000000")
+MAX_PRICE_CRYPTO = Decimal("1000000")
 
 
 def _product_card(product, available: int | None) -> str:
     status = "🟢 активен" if product.is_active else "⚪️ скрыт"
-    dtype = (
-        "🤖 авто" if product.delivery_type == DeliveryType.AUTO else "✋ ручная"
-    )
-    stock_line = (
-        f"\n📦 В наличии: <b>{available}</b>" if available is not None else ""
-    )
-    price_lines = []
+    dtype = "🤖 авто" if product.delivery_type == DeliveryType.AUTO else "✋ ручная"
+    photo = "🖼" if product.photo_file_id else "—"
+    stock_line = f"\n📦 В наличии: <b>{available}</b>" if available is not None else ""
+    prices = []
     if product.price_stars is not None:
-        price_lines.append(f"  • ⭐ Stars: <b>{product.price_stars}</b>")
+        prices.append(f"  • ⭐ Stars: <b>{product.price_stars}</b>")
     if product.price_rub is not None:
-        price_lines.append(f"  • ₽ RUB: <b>{product.price_rub.normalize():f}</b>")
+        prices.append(f"  • ₽ RUB: <b>{product.price_rub.normalize():f}</b>")
     if product.price_usdt is not None:
-        price_lines.append(f"  • ₮ USDT: <b>{product.price_usdt.normalize():f}</b>")
-    if not price_lines:
-        price_lines.append("  ⚠️ цены не заданы — товар нельзя купить")
-
+        prices.append(f"  • ₮ USDT: <b>{product.price_usdt.normalize():f}</b>")
+    if not prices:
+        prices.append("  ⚠️ цены не заданы — товар нельзя купить")
     return (
         f"<b>{product.title}</b>\n"
-        f"#{product.id} • {dtype} • {status}\n\n"
+        f"#{product.id} • {dtype} • {status} • фото: {photo}\n\n"
         f"{product.description or '—'}\n\n"
-        "💰 Цены:\n"
-        + "\n".join(price_lines)
-        + stock_line
+        f"💰 Цены:\n" + "\n".join(prices) + stock_line
     )
-
-
-# ---- list / view ---------------------------------------------------------
 
 
 @router.callback_query(F.data == "adm:list")
@@ -71,13 +67,19 @@ async def list_products(cb: CallbackQuery, session: AsyncSession) -> None:
         return
     products = await list_all_products(session)
     if not products:
-        await cb.message.edit_text(
-            "Товаров пока нет.", reply_markup=admin_menu_kb()
-        )
+        try:
+            await cb.message.edit_text("Товаров нет.")
+        except Exception:
+            pass
     else:
-        await cb.message.edit_text(
-            "📋 <b>Все товары</b>", reply_markup=products_list_kb(products)
-        )
+        try:
+            await cb.message.edit_text(
+                "📋 <b>Товары</b>", reply_markup=products_list_kb(products)
+            )
+        except Exception:
+            await cb.message.answer(
+                "📋 <b>Товары</b>", reply_markup=products_list_kb(products)
+            )
     await cb.answer()
 
 
@@ -86,69 +88,107 @@ async def view_product(cb: CallbackQuery, session: AsyncSession) -> None:
     if cb.message is None or cb.data is None:
         await cb.answer()
         return
-    product_id = int(cb.data.rsplit(":", 1)[1])
-    product = await get_product(session, product_id)
+    pid = int(cb.data.rsplit(":", 1)[1])
+    product = await get_product(session, pid)
     if product is None:
-        await cb.answer("Не найдено", show_alert=True)
+        await cb.answer("Нет", show_alert=True)
         return
     available = (
         await count_available_stock(session, product.id)
         if product.delivery_type == DeliveryType.AUTO
         else None
     )
-    await cb.message.edit_text(
-        _product_card(product, available), reply_markup=product_admin_kb(product)
-    )
+    try:
+        await cb.message.edit_text(
+            _product_card(product, available), reply_markup=product_admin_kb(product)
+        )
+    except Exception:
+        await cb.message.answer(
+            _product_card(product, available), reply_markup=product_admin_kb(product)
+        )
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("adm:toggle:"))
-async def toggle_active(cb: CallbackQuery, session: AsyncSession) -> None:
+async def toggle_active(
+    cb: CallbackQuery, session: AsyncSession, catalog: CatalogService
+) -> None:
     if cb.message is None or cb.data is None:
         await cb.answer()
         return
-    product_id = int(cb.data.rsplit(":", 1)[1])
-    product = await get_product(session, product_id)
+    pid = int(cb.data.rsplit(":", 1)[1])
+    product = await get_product(session, pid)
     if product is None:
-        await cb.answer("Не найдено", show_alert=True)
+        await cb.answer("Нет", show_alert=True)
         return
     if not product.is_active and not has_any_price(product):
-        await cb.answer(
-            "Сначала задайте хотя бы одну цену, потом публикуйте.", show_alert=True
-        )
+        await cb.answer("Сначала задайте цену", show_alert=True)
         return
     product.is_active = not product.is_active
+    await session.flush()
+    await catalog.invalidate()
+    available = (
+        await count_available_stock(session, product.id)
+        if product.delivery_type == DeliveryType.AUTO
+        else None
+    )
+    try:
+        await cb.message.edit_text(
+            _product_card(product, available), reply_markup=product_admin_kb(product)
+        )
+    except Exception:
+        pass
+    await cb.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("adm:stock_vis:"))
+async def toggle_stock_visibility(
+    cb: CallbackQuery, session: AsyncSession
+) -> None:
+    if cb.message is None or cb.data is None:
+        await cb.answer()
+        return
+    pid = int(cb.data.rsplit(":", 1)[1])
+    product = await get_product(session, pid)
+    if product is None:
+        await cb.answer()
+        return
+    product.show_stock = not product.show_stock
     await session.flush()
     available = (
         await count_available_stock(session, product.id)
         if product.delivery_type == DeliveryType.AUTO
         else None
     )
-    await cb.message.edit_text(
-        _product_card(product, available), reply_markup=product_admin_kb(product)
-    )
-    await cb.answer("Готово")
+    try:
+        await cb.message.edit_text(
+            _product_card(product, available), reply_markup=product_admin_kb(product)
+        )
+    except Exception:
+        pass
+    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("adm:del:"))
-async def delete(cb: CallbackQuery, session: AsyncSession) -> None:
-    if cb.message is None or cb.data is None:
+async def delete(
+    cb: CallbackQuery, session: AsyncSession, catalog: CatalogService
+) -> None:
+    if cb.data is None or cb.message is None:
         await cb.answer()
         return
-    product_id = int(cb.data.rsplit(":", 1)[1])
-    deleted = await delete_product(session, product_id)
-    if not deleted:
-        await cb.answer("Не найдено", show_alert=True)
+    pid = int(cb.data.rsplit(":", 1)[1])
+    if not await delete_product(session, pid):
+        await cb.answer("Нет", show_alert=True)
         return
+    await catalog.invalidate()
     products = await list_all_products(session)
-    if products:
+    try:
         await cb.message.edit_text(
-            "📋 <b>Все товары</b>", reply_markup=products_list_kb(products)
+            "📋 <b>Товары</b>" if products else "Товаров нет.",
+            reply_markup=products_list_kb(products) if products else None,
         )
-    else:
-        await cb.message.edit_text(
-            "Товаров пока нет.", reply_markup=admin_menu_kb()
-        )
+    except Exception:
+        pass
     await cb.answer("Удалено")
 
 
@@ -161,7 +201,7 @@ async def new_product(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer()
         return
     await state.set_state(ProductCreate.title)
-    await cb.message.edit_text("Введите название товара (до 128 символов):")
+    await cb.message.edit_text("Название товара (до 128):")
     await cb.answer()
 
 
@@ -169,13 +209,11 @@ async def new_product(cb: CallbackQuery, state: FSMContext) -> None:
 async def create_title(message: Message, state: FSMContext) -> None:
     title = (message.text or "").strip()
     if not title or len(title) > MAX_TITLE:
-        await message.answer(f"От 1 до {MAX_TITLE} символов.")
+        await message.answer(f"1..{MAX_TITLE} символов.")
         return
     await state.update_data(title=title)
     await state.set_state(ProductCreate.description)
-    await message.answer(
-        "Введите описание (до 4000 символов, «-» для пустого):"
-    )
+    await message.answer("Описание (или «-»):")
 
 
 @router.message(ProductCreate.description, F.text)
@@ -184,25 +222,27 @@ async def create_description(message: Message, state: FSMContext) -> None:
     if desc == "-":
         desc = ""
     if len(desc) > MAX_DESCRIPTION:
-        await message.answer(f"Максимум {MAX_DESCRIPTION} символов.")
+        await message.answer(f"Макс {MAX_DESCRIPTION}.")
         return
     await state.update_data(description=desc)
     await state.set_state(ProductCreate.delivery_type)
-    await message.answer("Выберите тип выдачи:", reply_markup=delivery_type_kb())
+    await message.answer("Тип выдачи:", reply_markup=delivery_type_kb())
 
 
 @router.callback_query(ProductCreate.delivery_type, F.data.startswith("adm:dtype:"))
 async def create_delivery(
-    cb: CallbackQuery, state: FSMContext, session: AsyncSession
+    cb: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
 ) -> None:
     if cb.message is None or cb.data is None:
         await cb.answer()
         return
-    dtype_raw = cb.data.rsplit(":", 1)[1]
     try:
-        dtype = DeliveryType(dtype_raw)
+        dtype = DeliveryType(cb.data.rsplit(":", 1)[1])
     except ValueError:
-        await cb.answer("Неверный тип", show_alert=True)
+        await cb.answer()
         return
     data = await state.get_data()
     product = await create_product(
@@ -210,157 +250,247 @@ async def create_delivery(
         title=data["title"],
         description=data.get("description", ""),
         delivery_type=dtype,
+        category_id=None,
     )
     await state.clear()
+    await catalog.invalidate()
     available = 0 if dtype == DeliveryType.AUTO else None
-    await cb.message.edit_text(
-        "✅ Товар создан.  Теперь задайте хотя бы одну цену.\n\n"
-        + _product_card(product, available),
-        reply_markup=product_admin_kb(product),
-    )
+    try:
+        await cb.message.edit_text(
+            "✅ Создан. Задайте цены / категорию.\n\n" + _product_card(product, available),
+            reply_markup=product_admin_kb(product),
+        )
+    except Exception:
+        await cb.message.answer(
+            _product_card(product, available), reply_markup=product_admin_kb(product)
+        )
     await cb.answer()
 
 
-# ---- edit flow -----------------------------------------------------------
+# ---- edit ----------------------------------------------------------------
 
 
 _EDIT_PROMPTS = {
-    "title": (ProductEdit.waiting_title, "Введите новое название:"),
-    "description": (
-        ProductEdit.waiting_description,
-        "Введите новое описание («-» чтобы очистить):",
-    ),
-    "price_stars": (
-        ProductEdit.waiting_price_stars,
-        "Введите цену в Telegram Stars (целое число, «-» чтобы убрать):",
-    ),
-    "price_rub": (
-        ProductEdit.waiting_price_rub,
-        "Введите цену в рублях (например 100 или 99.50, «-» чтобы убрать):",
-    ),
-    "price_usdt": (
-        ProductEdit.waiting_price_usdt,
-        "Введите цену в USDT (например 5.5, «-» чтобы убрать):",
+    "title": (ProductEdit.waiting_title, "Новое название:"),
+    "description": (ProductEdit.waiting_description, "Новое описание («-» очистить):"),
+    "price_stars": (ProductEdit.waiting_price_stars, "Цена в Stars (целое, «-» снять):"),
+    "price_rub": (ProductEdit.waiting_price_rub, "Цена в RUB («-» снять):"),
+    "price_usdt": (ProductEdit.waiting_price_usdt, "Цена в USDT («-» снять):"),
+    "photo": (ProductEdit.waiting_photo, "Пришлите фото (или «-» убрать):"),
+    "manual_template": (
+        ProductEdit.waiting_manual_template,
+        "Шаблон ручной выдачи (текст; «-» снять):",
     ),
 }
 
 
 @router.callback_query(F.data.startswith("adm:edit:"))
-async def edit_start(cb: CallbackQuery, state: FSMContext) -> None:
+async def edit_start(
+    cb: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     if cb.message is None or cb.data is None:
         await cb.answer()
         return
-    _, _, field, product_id_raw = cb.data.split(":")
+    _, _, field, pid_raw = cb.data.split(":")
+    pid = int(pid_raw)
+    if field == "category":
+        cats = await cat_repo.list_all(session)
+        await cb.message.edit_text(
+            "Выберите категорию:", reply_markup=category_pick_kb(cats, pid)
+        )
+        await cb.answer()
+        return
     if field not in _EDIT_PROMPTS:
-        await cb.answer("Нельзя редактировать это поле", show_alert=True)
+        await cb.answer()
         return
     target_state, prompt = _EDIT_PROMPTS[field]
     await state.set_state(target_state)
-    await state.update_data(product_id=int(product_id_raw))
+    await state.update_data(product_id=pid)
     await cb.message.edit_text(prompt)
     await cb.answer()
 
 
-@router.message(ProductEdit.waiting_title, F.text)
-async def edit_title(
-    message: Message, state: FSMContext, session: AsyncSession
+@router.callback_query(F.data.startswith("adm:setcat:"))
+async def set_category(
+    cb: CallbackQuery, session: AsyncSession, catalog: CatalogService
 ) -> None:
-    title = (message.text or "").strip()
-    if not title or len(title) > MAX_TITLE:
-        await message.answer(f"От 1 до {MAX_TITLE} символов.")
+    if cb.data is None or cb.message is None:
+        await cb.answer()
         return
-    await _apply_edit(message, state, session, "title", title)
-
-
-@router.message(ProductEdit.waiting_description, F.text)
-async def edit_description(
-    message: Message, state: FSMContext, session: AsyncSession
-) -> None:
-    desc = (message.text or "").strip()
-    if desc == "-":
-        desc = ""
-    if len(desc) > MAX_DESCRIPTION:
-        await message.answer(f"Максимум {MAX_DESCRIPTION} символов.")
-        return
-    await _apply_edit(message, state, session, "description", desc)
-
-
-@router.message(ProductEdit.waiting_price_stars, F.text)
-async def edit_price_stars(
-    message: Message, state: FSMContext, session: AsyncSession
-) -> None:
-    raw = (message.text or "").strip()
-    if raw == "-":
-        await _apply_edit(message, state, session, "price_stars", None)
-        return
-    if not raw.isdigit():
-        await message.answer("Нужно целое число больше нуля или «-».")
-        return
-    value = int(raw)
-    if value <= 0 or value > MAX_PRICE_STARS:
-        await message.answer(f"От 1 до {MAX_PRICE_STARS}.")
-        return
-    await _apply_edit(message, state, session, "price_stars", value)
-
-
-@router.message(ProductEdit.waiting_price_rub, F.text)
-async def edit_price_rub(
-    message: Message, state: FSMContext, session: AsyncSession
-) -> None:
-    await _edit_decimal(
-        message, state, session, "price_rub", MAX_PRICE_FIAT
-    )
-
-
-@router.message(ProductEdit.waiting_price_usdt, F.text)
-async def edit_price_usdt(
-    message: Message, state: FSMContext, session: AsyncSession
-) -> None:
-    await _edit_decimal(
-        message, state, session, "price_usdt", MAX_PRICE_CRYPTO
-    )
-
-
-async def _edit_decimal(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    field: str,
-    max_value: Decimal,
-) -> None:
-    raw = (message.text or "").strip()
-    if raw == "-":
-        await _apply_edit(message, state, session, field, None)
-        return
-    value = coerce_decimal(raw)
-    if value is None or value > max_value:
-        await message.answer(
-            f"Нужно положительное число до {max_value} или «-», чтобы убрать."
-        )
-        return
-    await _apply_edit(message, state, session, field, value)
-
-
-async def _apply_edit(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    field: str,
-    value: object,
-) -> None:
-    data = await state.get_data()
-    product_id = int(data.get("product_id", 0))
-    product = await update_product_field(session, product_id, field, value)
-    await state.clear()
+    _, _, pid_raw, cat_raw = cb.data.split(":")
+    pid = int(pid_raw)
+    cat_id = int(cat_raw) or None
+    product = await update_product_field(session, pid, "category_id", cat_id)
+    await catalog.invalidate()
     if product is None:
-        await message.answer("Товар уже удалён.", reply_markup=admin_menu_kb())
+        await cb.answer("Нет", show_alert=True)
         return
     available = (
         await count_available_stock(session, product.id)
         if product.delivery_type == DeliveryType.AUTO
         else None
     )
+    try:
+        await cb.message.edit_text(
+            _product_card(product, available), reply_markup=product_admin_kb(product)
+        )
+    except Exception:
+        pass
+    await cb.answer()
+
+
+@router.message(ProductEdit.waiting_title, F.text)
+async def edit_title(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    value = (message.text or "").strip()
+    if not value or len(value) > MAX_TITLE:
+        await message.answer(f"1..{MAX_TITLE}.")
+        return
+    await _apply(message, state, session, catalog, "title", value)
+
+
+@router.message(ProductEdit.waiting_description, F.text)
+async def edit_desc(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    raw = (message.text or "").strip()
+    if raw == "-":
+        raw = ""
+    if len(raw) > MAX_DESCRIPTION:
+        await message.answer(f"Макс {MAX_DESCRIPTION}.")
+        return
+    await _apply(message, state, session, catalog, "description", raw)
+
+
+@router.message(ProductEdit.waiting_manual_template, F.text)
+async def edit_manual_template(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    raw = (message.text or "").strip()
+    value: str | None = None if raw == "-" else raw
+    if value is not None and len(value) > MAX_DESCRIPTION:
+        await message.answer(f"Макс {MAX_DESCRIPTION}.")
+        return
+    await _apply(message, state, session, catalog, "manual_template", value)
+
+
+@router.message(ProductEdit.waiting_photo, F.photo)
+async def edit_photo(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    if not message.photo:
+        return
+    file_id = message.photo[-1].file_id
+    await _apply(message, state, session, catalog, "photo_file_id", file_id)
+
+
+@router.message(ProductEdit.waiting_photo, F.text)
+async def edit_photo_clear(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    if (message.text or "").strip() != "-":
+        await message.answer("Пришлите фото или «-».")
+        return
+    await _apply(message, state, session, catalog, "photo_file_id", None)
+
+
+@router.message(ProductEdit.waiting_price_stars, F.text)
+async def edit_price_stars(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    raw = (message.text or "").strip()
+    if raw == "-":
+        await _apply(message, state, session, catalog, "price_stars", None)
+        return
+    if not raw.isdigit():
+        await message.answer("Нужно целое или «-».")
+        return
+    v = int(raw)
+    if v <= 0 or v > MAX_PRICE_STARS:
+        await message.answer(f"1..{MAX_PRICE_STARS}.")
+        return
+    await _apply(message, state, session, catalog, "price_stars", v)
+
+
+@router.message(ProductEdit.waiting_price_rub, F.text)
+async def edit_price_rub(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    await _decimal(message, state, session, catalog, "price_rub", MAX_PRICE_FIAT)
+
+
+@router.message(ProductEdit.waiting_price_usdt, F.text)
+async def edit_price_usdt(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+) -> None:
+    await _decimal(message, state, session, catalog, "price_usdt", MAX_PRICE_CRYPTO)
+
+
+async def _decimal(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+    field: str,
+    cap: Decimal,
+) -> None:
+    raw = (message.text or "").strip()
+    if raw == "-":
+        await _apply(message, state, session, catalog, field, None)
+        return
+    v = coerce_decimal(raw)
+    if v is None or v > cap:
+        await message.answer(f"1..{cap} или «-».")
+        return
+    await _apply(message, state, session, catalog, field, v)
+
+
+async def _apply(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    catalog: CatalogService,
+    field: str,
+    value: object,
+) -> None:
+    data = await state.get_data()
+    pid = int(data.get("product_id", 0))
+    product = await update_product_field(session, pid, field, value)
+    await state.clear()
+    if product is None:
+        await message.answer("Уже удалён.")
+        return
+    await catalog.invalidate()
+    available = (
+        await count_available_stock(session, product.id)
+        if product.delivery_type == DeliveryType.AUTO
+        else None
+    )
     await message.answer(
-        "✅ Обновлено.\n\n" + _product_card(product, available),
-        reply_markup=product_admin_kb(product),
+        _product_card(product, available), reply_markup=product_admin_kb(product)
     )

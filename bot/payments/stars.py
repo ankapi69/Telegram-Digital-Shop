@@ -48,13 +48,15 @@ class StarsProvider(PaymentProvider):
         *,
         bot: "Bot",
         order: "Order",
-        product: "Product",
+        product: "Product | None",
         user: "TgUser",
     ) -> InvoiceResult:
-        stars = int(order.amount)
+        stars = int(order.total_amount)
         payload = encode_payload(order.id)
-        title = (product.title or "Товар")[:32]
-        description = (product.description or product.title or "Товар")[:255]
+        first_item = order.items[0] if order.items else None
+        title_src = first_item.title_snapshot if first_item else f"Заказ #{order.id}"
+        title = title_src[:32]
+        description = f"Заказ #{order.id}"[:255]
         await bot.send_invoice(
             chat_id=user.id,
             title=title,

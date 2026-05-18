@@ -1,28 +1,60 @@
-from aiogram import Dispatcher
+from __future__ import annotations
+
+from aiogram import Dispatcher, Router
 
 from bot.config import Settings
-from bot.filters.admin import AdminFilter
-from bot.handlers import catalog, checkout, orders, start
-from bot.handlers.admin import menu as admin_menu
-from bot.handlers.admin import orders as admin_orders
-from bot.handlers.admin import products as admin_products
-from bot.handlers.admin import stock as admin_stock
+from bot.database.models import UserRole
+from bot.filters.admin import RoleFilter
+from bot.handlers.admin import (
+    broadcast as admin_broadcast,
+    categories as admin_categories,
+    menu as admin_menu,
+    orders as admin_orders,
+    products as admin_products,
+    promo as admin_promo,
+    stats as admin_stats,
+    stock as admin_stock,
+    users as admin_users,
+)
+from bot.handlers.user import (
+    cart as user_cart,
+    catalog as user_catalog,
+    checkout as user_checkout,
+    orders as user_orders,
+    start as user_start,
+    support as user_support,
+)
+
+
+def _admin(router: Router, min_role: UserRole) -> Router:
+    flt = RoleFilter(min_role)
+    router.message.filter(flt)
+    router.callback_query.filter(flt)
+    return router
 
 
 def register(dp: Dispatcher, settings: Settings) -> None:
-    dp.include_router(start.router)
-    dp.include_router(catalog.router)
-    dp.include_router(checkout.router)
-    dp.include_router(orders.router)
+    # Support group reply listener (placed first, scoped by chat id filter)
+    dp.include_router(user_support.make_group_router(settings))
 
-    admin_filter = AdminFilter(set(settings.admin_ids))
-    admin_routers = (
-        admin_menu.router,
-        admin_products.router,
-        admin_stock.router,
-        admin_orders.router,
-    )
-    for router in admin_routers:
-        router.message.filter(admin_filter)
-        router.callback_query.filter(admin_filter)
-        dp.include_router(router)
+    # User-facing
+    for r in (
+        user_start.router,
+        user_catalog.router,
+        user_cart.router,
+        user_checkout.router,
+        user_orders.router,
+        user_support.router,
+    ):
+        dp.include_router(r)
+
+    # Admin
+    dp.include_router(_admin(admin_menu.router, UserRole.SUPPORT))
+    dp.include_router(_admin(admin_products.router, UserRole.MANAGER))
+    dp.include_router(_admin(admin_categories.router, UserRole.MANAGER))
+    dp.include_router(_admin(admin_stock.router, UserRole.MANAGER))
+    dp.include_router(_admin(admin_orders.router, UserRole.MANAGER))
+    dp.include_router(_admin(admin_promo.router, UserRole.SUPERADMIN))
+    dp.include_router(_admin(admin_stats.router, UserRole.SUPERADMIN))
+    dp.include_router(_admin(admin_broadcast.router, UserRole.SUPERADMIN))
+    dp.include_router(_admin(admin_users.router, UserRole.SUPPORT))

@@ -83,10 +83,15 @@ class PaymentProvider(ABC):
         *,
         bot: "Bot",
         order: "Order",
-        product: "Product",
+        product: "Product | None",
         user: "TgUser",
     ) -> InvoiceResult:
-        """Create an invoice on the provider's side and return identifiers."""
+        """Create an invoice on the provider's side and return identifiers.
+
+        ``product`` is provided for single-line orders for backwards
+        compatibility; for multi-item carts it is ``None`` and the
+        provider should derive a description from ``order``.
+        """
 
     @abstractmethod
     async def verify(self, order: "Order") -> PaymentStatus:

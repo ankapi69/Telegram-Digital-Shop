@@ -91,11 +91,11 @@ class CryptoBotProvider(PaymentProvider):
         *,
         bot: "Bot",
         order: "Order",
-        product: "Product",
+        product: "Product | None",
         user: "TgUser",
     ) -> InvoiceResult:
-        amount = format(order.amount, "f")
-        description = (product.description or product.title or "Товар")[:1024]
+        amount = format(order.total_amount, "f")
+        description = f"Заказ #{order.id}"[:1024]
         result = await self._call(
             "createInvoice",
             {

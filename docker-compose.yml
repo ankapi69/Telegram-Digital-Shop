@@ -7,8 +7,6 @@ services:
       DATABASE_URL: postgresql+asyncpg://shop:shop@db:5432/shop
       REDIS_URL: redis://redis:6379/0
       WEBHOOK_HOST: 0.0.0.0
-    # Expose the webhook port only if WEBHOOK_ENABLED=true and you don't
-    # want to put nginx in front. Typically you do — terminate TLS there.
     # ports:
     #   - "8081:8081"
     depends_on:
@@ -35,6 +33,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    volumes:
+      - redisdata:/data
 
 volumes:
   pgdata:
+  redisdata:

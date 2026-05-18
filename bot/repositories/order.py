@@ -1,85 +1,116 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from bot.database.models import Order, OrderStatus, Product
+from bot.database.models import (
+    Order,
+    OrderItem,
+    OrderItemStatus,
+    OrderStatus,
+    Product,
+)
 
 
 async def create_order(
     session: AsyncSession,
     *,
     user_id: int,
-    product_id: int,
     provider: str,
     currency: str,
-    amount: Decimal,
+    subtotal: Decimal,
+    discount: Decimal,
+    total: Decimal,
+    promo_code: str | None,
+    items: Iterable[tuple[Product, int, Decimal]],
 ) -> Order:
     order = Order(
         user_id=user_id,
-        product_id=product_id,
         provider=provider,
         currency=currency,
-        amount=amount,
+        subtotal_amount=subtotal,
+        discount_amount=discount,
+        total_amount=total,
+        promo_code=promo_code,
         status=OrderStatus.PENDING_PAYMENT,
     )
+    for product, qty, unit_price in items:
+        order.items.append(
+            OrderItem(
+                product_id=product.id,
+                title_snapshot=product.title,
+                quantity=qty,
+                unit_price=unit_price,
+            )
+        )
     session.add(order)
     await session.flush()
     return order
 
 
 async def get_order(session: AsyncSession, order_id: int) -> Order | None:
-    return await session.get(Order, order_id)
-
-
-async def get_order_with_product(
-    session: AsyncSession, order_id: int
-) -> tuple[Order, Product] | None:
     stmt = (
-        select(Order, Product)
-        .join(Product, Product.id == Order.product_id)
+        select(Order)
         .where(Order.id == order_id)
+        .options(selectinload(Order.items))
     )
-    row = (await session.execute(stmt)).first()
-    return (row[0], row[1]) if row else None
-
-
-async def list_awaiting_delivery(session: AsyncSession) -> list[Order]:
-    stmt = (
-        select(Order)
-        .where(Order.status == OrderStatus.AWAITING_DELIVERY)
-        .order_by(Order.id)
-    )
-    return list((await session.execute(stmt)).scalars().all())
-
-
-async def list_user_orders(session: AsyncSession, user_id: int) -> list[Order]:
-    stmt = (
-        select(Order)
-        .where(Order.user_id == user_id)
-        .order_by(Order.id.desc())
-        .limit(20)
-    )
-    return list((await session.execute(stmt)).scalars().all())
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def find_pending_by_external(
     session: AsyncSession, provider: str, external_id: str
 ) -> Order | None:
-    stmt = select(Order).where(
-        Order.provider == provider,
-        Order.external_id == external_id,
+    stmt = (
+        select(Order)
+        .where(Order.provider == provider, Order.external_id == external_id)
+        .options(selectinload(Order.items))
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def mark_delivered_manual(
-    session: AsyncSession, order: Order, content: str
-) -> None:
-    order.status = OrderStatus.DELIVERED
-    order.delivered_content = content
-    order.delivered_at = datetime.now(timezone.utc)
+async def list_user_orders_page(
+    session: AsyncSession, user_id: int, page: int, per_page: int = 5
+) -> tuple[list[Order], int]:
+    total = int(
+        (
+            await session.execute(
+                select(func.count(Order.id)).where(Order.user_id == user_id)
+            )
+        ).scalar_one()
+    )
+    stmt = (
+        select(Order)
+        .where(Order.user_id == user_id)
+        .options(selectinload(Order.items))
+        .order_by(Order.id.desc())
+        .offset(max(0, page - 1) * per_page)
+        .limit(per_page)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    return rows, total
+
+
+async def list_pending_manual_items(session: AsyncSession) -> list[OrderItem]:
+    """Items that have been paid for but still need manual delivery."""
+    stmt = (
+        select(OrderItem)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(
+            OrderItem.status == OrderItemStatus.PENDING,
+            Order.status == OrderStatus.AWAITING_DELIVERY,
+        )
+        .order_by(OrderItem.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_order_item(session: AsyncSession, item_id: int) -> OrderItem | None:
+    return await session.get(OrderItem, item_id)
 
 
 async def set_invoice_data(
@@ -91,3 +122,21 @@ async def set_invoice_data(
     order.external_id = external_id
     order.payment_url = payment_url
     await session.flush()
+
+
+async def mark_item_delivered(
+    session: AsyncSession, item: OrderItem, content: str
+) -> None:
+    item.status = OrderItemStatus.DELIVERED
+    item.delivered_content = content
+    item.delivered_at = datetime.now(timezone.utc)
+
+
+async def refresh_order_state(session: AsyncSession, order: Order) -> None:
+    """Roll up item statuses into the parent Order status."""
+    pending = [i for i in order.items if i.status != OrderItemStatus.DELIVERED]
+    if not pending:
+        order.status = OrderStatus.DELIVERED
+        order.delivered_at = datetime.now(timezone.utc)
+    else:
+        order.status = OrderStatus.AWAITING_DELIVERY

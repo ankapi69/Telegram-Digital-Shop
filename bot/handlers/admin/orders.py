@@ -1,27 +1,29 @@
-import logging
+from __future__ import annotations
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.models import OrderStatus
+from bot.database.models import OrderItemStatus
 from bot.keyboards.admin import (
     admin_menu_kb,
-    order_fulfill_kb,
-    pending_orders_kb,
+    item_fulfill_kb,
+    pending_items_kb,
 )
 from bot.repositories.order import (
-    get_order_with_product,
-    list_awaiting_delivery,
-    mark_delivered_manual,
+    get_order,
+    get_order_item,
+    list_pending_manual_items,
+    mark_item_delivered,
+    refresh_order_state,
 )
 from bot.states.admin import ManualFulfill
 
 router = Router(name="admin-orders")
-log = logging.getLogger(__name__)
 
-MAX_CONTENT_LENGTH = 4000
+MAX_CONTENT = 4000
 
 
 @router.callback_query(F.data == "adm:manual")
@@ -29,39 +31,46 @@ async def list_manual(cb: CallbackQuery, session: AsyncSession) -> None:
     if cb.message is None:
         await cb.answer()
         return
-    orders = await list_awaiting_delivery(session)
-    if not orders:
-        await cb.message.edit_text(
-            "Очередь ручной выдачи пуста.", reply_markup=admin_menu_kb()
-        )
+    items = await list_pending_manual_items(session)
+    if not items:
+        try:
+            await cb.message.edit_text("Очередь пуста.")
+        except Exception:
+            pass
     else:
-        await cb.message.edit_text(
-            "📨 <b>Ожидают ручной выдачи</b>",
-            reply_markup=pending_orders_kb(orders),
-        )
+        try:
+            await cb.message.edit_text(
+                "📨 <b>Ждут ручной выдачи</b>", reply_markup=pending_items_kb(items)
+            )
+        except Exception:
+            await cb.message.answer(
+                "📨 <b>Ждут ручной выдачи</b>", reply_markup=pending_items_kb(items)
+            )
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("adm:ord:"))
-async def view_order(cb: CallbackQuery, session: AsyncSession) -> None:
-    if cb.message is None or cb.data is None:
+@router.callback_query(F.data.startswith("adm:item:"))
+async def view_item(cb: CallbackQuery, session: AsyncSession) -> None:
+    if cb.data is None or cb.message is None:
         await cb.answer()
         return
-    order_id = int(cb.data.rsplit(":", 1)[1])
-    row = await get_order_with_product(session, order_id)
-    if row is None:
-        await cb.answer("Не найден", show_alert=True)
+    item_id = int(cb.data.rsplit(":", 1)[1])
+    item = await get_order_item(session, item_id)
+    if item is None:
+        await cb.answer("Нет", show_alert=True)
         return
-    order, product = row
-    await cb.message.edit_text(
-        f"Заказ <b>#{order.id}</b>\n"
-        f"Товар: <b>{product.title}</b>\n"
-        f"Сумма: <b>{order.amount} {order.currency}</b>\n"
-        f"Способ: {order.provider}\n"
-        f"Покупатель: <code>{order.user_id}</code>\n"
-        f"Статус: <i>{order.status.value}</i>",
-        reply_markup=order_fulfill_kb(order.id),
+    order = await get_order(session, item.order_id)
+    text = (
+        f"Заказ <b>#{item.order_id}</b> · позиция #{item.id}\n"
+        f"Товар: <b>{item.title_snapshot}</b> ×{item.quantity}\n"
+        f"Сумма: <b>{item.unit_price * item.quantity} {order.currency if order else ''}</b>\n"
+        f"Покупатель: <code>{order.user_id if order else ''}</code>\n"
+        f"Статус позиции: <i>{item.status.value}</i>"
     )
+    try:
+        await cb.message.edit_text(text, reply_markup=item_fulfill_kb(item.id))
+    except Exception:
+        await cb.message.answer(text, reply_markup=item_fulfill_kb(item.id))
     await cb.answer()
 
 
@@ -69,64 +78,59 @@ async def view_order(cb: CallbackQuery, session: AsyncSession) -> None:
 async def fulfill_start(
     cb: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    if cb.message is None or cb.data is None:
+    if cb.data is None or cb.message is None:
         await cb.answer()
         return
-    order_id = int(cb.data.rsplit(":", 1)[1])
-    row = await get_order_with_product(session, order_id)
-    if row is None or row[0].status != OrderStatus.AWAITING_DELIVERY:
-        await cb.answer("Заказ уже не ждёт выдачи", show_alert=True)
+    item_id = int(cb.data.rsplit(":", 1)[1])
+    item = await get_order_item(session, item_id)
+    if item is None or item.status != OrderItemStatus.PENDING:
+        await cb.answer("Уже выдано/недоступно", show_alert=True)
         return
     await state.set_state(ManualFulfill.waiting_content)
-    await state.update_data(order_id=order_id)
+    await state.update_data(item_id=item_id)
     await cb.message.edit_text(
-        f"Пришлите содержимое для заказа #{order_id}. "
-        "Оно будет отправлено покупателю как есть."
+        f"Пришлите содержимое для #{item.order_id}·{item.id}. "
+        "Будет отправлено покупателю как есть."
     )
     await cb.answer()
 
 
 @router.message(ManualFulfill.waiting_content, F.text)
 async def fulfill_send(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     content = (message.text or "").strip()
     if not content:
-        await message.answer("Пустой текст. Пришлите содержимое.")
+        await message.answer("Пусто.")
         return
-    if len(content) > MAX_CONTENT_LENGTH:
-        await message.answer(f"Слишком длинно (>{MAX_CONTENT_LENGTH}).")
+    if len(content) > MAX_CONTENT:
+        await message.answer(f"Макс {MAX_CONTENT}.")
         return
 
     data = await state.get_data()
-    order_id = int(data.get("order_id", 0))
-    row = await get_order_with_product(session, order_id)
-    if row is None or row[0].status != OrderStatus.AWAITING_DELIVERY:
+    item_id = int(data.get("item_id", 0))
+    item = await get_order_item(session, item_id)
+    if item is None or item.status != OrderItemStatus.PENDING:
         await state.clear()
-        await message.answer("Заказ уже обработан.", reply_markup=admin_menu_kb())
+        await message.answer("Уже обработано.")
         return
-    order, product = row
-
+    order = await get_order(session, item.order_id)
+    if order is None:
+        await state.clear()
+        await message.answer("Заказ исчез.")
+        return
     try:
         await bot.send_message(
             order.user_id,
-            "✉️ Ваш заказ выдан вручную.\n\n"
-            f"Товар: <b>{product.title}</b>\n\n"
-            f"<code>{content}</code>",
+            "✉️ Ручная выдача.\n\n"
+            f"<b>{item.title_snapshot}</b>\n\n<code>{content}</code>",
         )
     except Exception:
-        log.exception("Failed to deliver order %s to user %s", order.id, order.user_id)
-        await message.answer(
-            "Не удалось отправить сообщение покупателю. "
-            "Заказ оставлен в очереди."
-        )
+        logger.exception("manual deliver to {} failed", order.user_id)
+        await message.answer("Не удалось отправить пользователю.")
         return
 
-    await mark_delivered_manual(session, order, content)
+    await mark_item_delivered(session, item, content)
+    await refresh_order_state(session, order)
     await state.clear()
-    await message.answer(
-        f"✅ Заказ #{order.id} выдан.", reply_markup=admin_menu_kb()
-    )
+    await message.answer(f"✅ Позиция #{item.id} выдана.")

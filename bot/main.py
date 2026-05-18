@@ -1,37 +1,53 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import signal
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from loguru import logger
+from redis.asyncio import Redis
 
 from bot.config import Settings, get_settings
 from bot.database.engine import build_engine, build_sessionmaker
-from bot.database.models import Base
 from bot.handlers import register as register_handlers
 from bot.middlewares.db import DbSessionMiddleware
+from bot.middlewares.i18n import I18nMiddleware
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.middlewares.user_context import UserContextMiddleware
 from bot.payments.registry import build_registry
+from bot.services.broadcast import Broadcaster
+from bot.services.cache import TTLCache
+from bot.services.cart import CartService
+from bot.services.catalog import CatalogService
+from bot.services.notifier import Notifier
+from bot.services.support import SupportService
 from bot.utils.logging import configure_logging
 from bot.webhook import build_webhook_app, run_webhook_server
 
-log = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-async def _build_storage(settings: Settings):
-    if settings.redis_url:
-        return RedisStorage.from_url(settings.redis_url)
+def run_migrations(database_url: str) -> None:
+    """Run ``alembic upgrade head``. Must be called from a sync context —
+    Alembic's online mode opens its own event loop in env.py."""
+    cfg = AlembicConfig(str(PROJECT_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(cfg, "head")
+
+
+async def _build_storage(settings: Settings, redis: Redis | None):
+    if redis is not None:
+        return RedisStorage(redis=redis)
     return MemoryStorage()
-
-
-async def _init_schema(engine) -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 
 async def run() -> None:
@@ -39,10 +55,18 @@ async def run() -> None:
     configure_logging(settings.log_level)
 
     engine = build_engine(settings.database_url)
-    await _init_schema(engine)
     sessionmaker = build_sessionmaker(engine)
 
-    storage = await _build_storage(settings)
+    redis: Redis | None = None
+    if settings.redis_url:
+        redis = Redis.from_url(settings.redis_url, decode_responses=False)
+        try:
+            await redis.ping()
+        except Exception:
+            logger.warning("Redis unavailable, falling back to in-memory")
+            redis = None
+
+    storage = await _build_storage(settings, redis)
 
     bot = Bot(
         token=settings.bot_token,
@@ -50,13 +74,28 @@ async def run() -> None:
     )
 
     registry = build_registry(settings)
+    notifier = Notifier(
+        bot, admin_ids=settings.admin_ids, notify_group_id=settings.notify_group_id
+    )
+    cache = TTLCache(redis, default_ttl=settings.catalog_cache_ttl)
+    catalog = CatalogService(cache)
+    cart = CartService(redis, ttl=settings.cart_ttl_seconds)
+    broadcaster = Broadcaster(bot, rate_per_sec=settings.broadcast_rate_per_sec)
+    support = SupportService(bot=bot, group_id=settings.support_group_id, redis=redis)
 
     dp = Dispatcher(storage=storage)
     dp["settings"] = settings
     dp["registry"] = registry
+    dp["notifier"] = notifier
+    dp["catalog"] = catalog
+    dp["cart"] = cart
+    dp["broadcaster"] = broadcaster
+    dp["support"] = support
 
     dp.update.middleware(ThrottlingMiddleware(rate=settings.throttle_rate))
     dp.update.middleware(DbSessionMiddleware(sessionmaker))
+    dp.update.middleware(UserContextMiddleware())
+    dp.update.middleware(I18nMiddleware())
 
     register_handlers(dp, settings)
 
@@ -70,15 +109,15 @@ async def run() -> None:
 
     webhook_runner = None
     if settings.webhook_enabled:
-        app = build_webhook_app(registry, sessionmaker, bot, settings)
+        app = build_webhook_app(registry, sessionmaker, bot, notifier, settings)
         if app.router.routes():
             webhook_runner = await run_webhook_server(
                 app, settings.webhook_host, settings.webhook_port
             )
         else:
-            log.info("webhook server skipped: no providers expose webhooks")
+            logger.info("webhook server skipped: no providers expose webhooks")
 
-    log.info("Bot is starting (providers: %s)", [p.code for p in registry.all()])
+    logger.info("bot starting (providers: {})", [p.code for p in registry.all()])
     try:
         await bot.delete_webhook(drop_pending_updates=False)
         polling = asyncio.create_task(
@@ -100,5 +139,7 @@ async def run() -> None:
         await registry.aclose()
         await dp.storage.close()
         await bot.session.close()
+        if redis is not None:
+            await redis.aclose()
         await engine.dispose()
-        log.info("Bot stopped cleanly")
+        logger.info("bot stopped cleanly")

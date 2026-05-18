@@ -112,12 +112,12 @@ class LavaProvider(PaymentProvider):
         *,
         bot: "Bot",
         order: "Order",
-        product: "Product",
+        product: "Product | None",
         user: "TgUser",
     ) -> InvoiceResult:
         local_order_id = uuid.uuid4().hex
-        amount = format(order.amount, "f")
-        comment = (product.description or product.title or "Товар")[:255]
+        amount = format(order.total_amount, "f")
+        comment = f"Заказ #{order.id}"[:255]
         payload: dict[str, Any] = {
             "sum": amount,
             "orderId": local_order_id,

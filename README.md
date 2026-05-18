@@ -1,136 +1,130 @@
 # Telegram Digital Shop
 
-Простой Telegram-бот для продажи цифровых товаров (активационные ссылки,
-аккаунты, ключи) с подключаемыми платёжными провайдерами.
+Production-ready Telegram-бот для продажи цифровых товаров (аккаунты,
+активационные ссылки). Слоистая архитектура, async-everything,
+PostgreSQL + Redis, подключаемые платёжные провайдеры.
 
 ## Возможности
 
-- Каталог товаров с описанием и **отдельной ценой на каждую валюту**.
-- Два типа выдачи:
-  - **Авто** — товар хранится списком (склад) и выдаётся в момент оплаты.
-  - **Ручная** — после оплаты заказ попадает в очередь, админ присылает
-    содержимое из админ-панели.
-- Платежи через подключаемых провайдеров. Каждый продаёт в своей валюте,
-  у товара может быть произвольный набор цен.
-- Подтверждение оплаты двумя способами: **вебхук** (если настроен) и
-  кнопка **«Проверить оплату»** в чате с ботом.
-- Защита от спама, идемпотентная выдача заказов под параллельным
-  webhook + кнопкой, атомарная резервация склада (CAS-update,
-  работает на SQLite и Postgres).
+**Каталог**
+- Категории → подкатегории (2 уровня) с CRUD прямо в боте.
+- Фото товара, описание, цена в любой валюте.
+- Загрузка единиц выдачи через CSV-файл **или** массовый текст.
+- Показ остатка покупателю (можно скрыть).
+- Авто- и ручная выдача в одном заказе.
 
-## Поддерживаемые платёжки
+**Покупка**
+- Корзина с несколькими позициями (Redis с TTL).
+- Промокоды: % и фикс, лимит использований, привязка к валюте.
+- Платёжные провайдеры (см. ниже), оба способа подтверждения:
+  webhook + кнопка «Проверить оплату».
+- История заказов с inline-пагинацией.
+- Авто-чек после оплаты.
 
-| Код          | Валюта     | Webhook | Ручная проверка | Где взять токены                       |
-| ------------ | ---------- | :-----: | :-------------: | -------------------------------------- |
-| `stars`      | XTR (Stars)| –       | – *(нативно)*   | Только `BOT_TOKEN`                     |
-| `cryptobot`  | любая*     | ✔       | ✔               | `@CryptoBot` → Crypto Pay → Create App |
-| `lava`       | RUB        | ✔       | ✔               | lava.ru → Кабинет → API                |
+**Поддержка**
+- Кнопка «Поддержка» в главном меню.
+- Сообщения пользователя пересылаются в группу `SUPPORT_GROUP_ID`.
+- Ответ менеджера в группе (Reply) автоматически уходит пользователю.
 
-*CryptoBot: `CRYPTOBOT_ASSET` задаёт актив (USDT/TON/BTC/…).
-Stars подтверждаются Telegram'ом автоматически, отдельная проверка не нужна.
+**Админ-панель**
+- Роли `superadmin / manager / support`.
+- Уведомления о новых заказах и запросах ручной выдачи → `NOTIFY_GROUP_ID`.
+- Статистика: выручка по дням, топ товаров, DAU, баны.
+- Рассылка: текст + фото + inline-кнопка, throttled rate limiter.
+- Блокировка пользователей, поиск по ID/`@username`.
 
-## Подключить новую платёжку
+**Под капотом**
+- Async SQLAlchemy 2 + asyncpg, индексы, connection pool.
+- Alembic-миграции (запускаются автоматом при старте).
+- Redis: FSM, корзина, кеш каталога, ретеншн support-replies.
+- Compare-and-swap резервация склада (race-free на любых СУБД).
+- Idempotent fulfillment: webhook + кнопка не могут продублировать выдачу.
+- Loguru, throttling, graceful shutdown.
 
-Добавить файл `bot/payments/<name>.py`, унаследовать
-`PaymentProvider`, реализовать четыре метода:
+## Платёжные провайдеры
 
-```python
-class MyProvider(PaymentProvider):
-    code = "myprov"
-    display_name = "MyProv"
+| Код         | Валюта  | Webhook | Ручная проверка |
+| ----------- | ------- | :-----: | :-------------: |
+| `stars`     | XTR     | –       | – *(нативно)*   |
+| `cryptobot` | любой*  | ✔       | ✔               |
+| `lava`      | RUB     | ✔       | ✔               |
 
-    def __init__(self, ...):
-        self.currency = "EUR"
-        ...
+\* CryptoBot: `CRYPTOBOT_ASSET` задаёт актив (USDT/TON/BTC/…).
 
-    def price_for(self, product) -> Decimal | None:
-        return product.price_eur          # добавьте свою колонку в Product
+Добавить новую платёжку — один файл `bot/payments/<name>.py`,
+наследник `PaymentProvider`. Зарегистрировать в
+`bot.payments.registry.build_registry()` и добавить колонку цены в
+`Product` + миграцию.
 
-    async def create_invoice(self, *, bot, order, product, user) -> InvoiceResult: ...
-    async def verify(self, order) -> PaymentStatus: ...
-    async def parse_webhook(self, headers, body) -> WebhookEvent | None: ...  # опц.
-```
+## Запуск
 
-Прописать конфиг в `Settings`, зарегистрировать в
-`build_registry()` — и провайдер появится в кнопках карточки товара.
-
-## Стек
-
-- Python 3.11+, `aiogram` 3.x
-- `SQLAlchemy` 2 (async) + `aiosqlite` (dev) / `asyncpg` (prod)
-- `aiohttp` (вебхук-сервер), `pydantic-settings`, `structlog`
-- Опционально Redis для FSM (`RedisStorage`)
-
-## Запуск (локально, SQLite)
+### Docker (рекомендуется)
 
 ```bash
 cp .env.example .env
-# открой .env, поставь BOT_TOKEN и свой ADMIN_IDS,
-# при желании — токены платёжек.
+# открой .env, поставь BOT_TOKEN и SUPERADMIN_IDS
+docker compose up -d --build
+```
+
+Compose поднимает Postgres + Redis + бота. Миграции применяются
+автоматически при старте контейнера.
+
+### Локально (dev)
+
+```bash
+cp .env.example .env
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m bot
 ```
 
-## Запуск в Docker (Postgres + Redis)
+При локальной разработке без Postgres достаточно поменять
+`DATABASE_URL=sqlite+aiosqlite:///./shop.db` — Alembic-миграции
+сработают и на SQLite.
 
-```bash
-cp .env.example .env
-docker compose up -d --build
+## Структура
+
 ```
-
-`docker-compose.yml` уже переопределяет `DATABASE_URL` и `REDIS_URL` для
-сервисов `db` и `redis`. Если включены вебхуки, открой `WEBHOOK_PORT`
-наружу (или поставь nginx перед сервисом).
+bot/
+├── handlers/
+│   ├── user/        start, catalog, cart, checkout, orders, support
+│   └── admin/       menu, products, categories, stock, orders,
+│                    promo, stats, broadcast, users
+├── services/        cart, catalog, checkout, promo, stats,
+│                    broadcast, notifier, support, cache
+├── payments/        base, registry, fulfillment, stars,
+│                    cryptobot, lava + webhook.py
+├── repositories/    user, category, product, stock, order,
+│                    promo, stats
+├── database/        models.py (все ORM-модели), engine.py
+├── middlewares/     db, throttling, user_context, i18n
+├── keyboards/       user.py, admin.py
+├── filters/         admin.py (RoleFilter, SupportGroupFilter)
+├── states/          admin.py (FSM-группы)
+├── locales/         ru.py + translate()
+└── utils/           logging (loguru), money, csv_import, pagination
+migrations/          Alembic
+```
 
 ## Конфигурация
 
-| Переменная             | Назначение                                                |
-| ---------------------- | --------------------------------------------------------- |
-| `BOT_TOKEN`            | Токен от @BotFather                                       |
-| `ADMIN_IDS`            | ID админов через запятую                                  |
-| `DATABASE_URL`         | SQLAlchemy URL (sqlite/postgres)                          |
-| `REDIS_URL`            | Redis для FSM                                             |
-| `THROTTLE_RATE`        | Минимум секунд между апдейтами от пользователя            |
-| `LOG_LEVEL`            | `DEBUG` / `INFO` / `WARNING` / `ERROR`                    |
-| `WEBHOOK_ENABLED`      | `true` чтобы поднять aiohttp-сервер для платёжных хуков   |
-| `WEBHOOK_HOST/PORT`    | Где слушает aiohttp                                       |
-| `WEBHOOK_PUBLIC_URL`   | Куда могут прийти провайдеры (за TLS-прокси)              |
-| `WEBHOOK_BASE_PATH`    | Префикс пути (по умолчанию `/payments`)                   |
-| `CRYPTOBOT_TOKEN/ASSET/TESTNET` | Crypto Pay                                       |
-| `LAVA_SECRET_KEY/SHOP_ID` | Lava.ru Business                                       |
-| `LAVA_SUCCESS_URL/FAIL_URL` | Возврат пользователя после оплаты Lava               |
+| Переменная                | Назначение                                              |
+| ------------------------- | ------------------------------------------------------- |
+| `BOT_TOKEN`               | Токен от @BotFather                                     |
+| `SUPERADMIN_IDS`          | Полный доступ                                           |
+| `MANAGER_IDS`             | Каталог, склад, заказы                                  |
+| `SUPPORT_IDS`             | Поддержка, пользователи                                 |
+| `DATABASE_URL`            | postgres / sqlite                                       |
+| `REDIS_URL`               | Redis (FSM + корзина + кеш + support replies)           |
+| `NOTIFY_GROUP_ID`         | Группа уведомлений (новые заказы, ручная выдача)        |
+| `SUPPORT_GROUP_ID`        | Группа поддержки (форвард-в, reply-обратно)             |
+| `WEBHOOK_*`               | aiohttp-сервер для платёжных webhook'ов                 |
+| `CRYPTOBOT_*` / `LAVA_*`  | Ключи платёжек                                          |
+| `CATALOG_CACHE_TTL`       | TTL кеша каталога (сек)                                 |
+| `CART_TTL_SECONDS`        | Сколько живёт корзина в Redis                           |
+| `BROADCAST_RATE_PER_SEC`  | Ограничение скорости рассылки                           |
 
 ## Команды
 
-- `/start` — главное меню (каталог, мои заказы).
-- `/admin` — админ-панель (только для `ADMIN_IDS`).
-
-## Архитектура платежей
-
-```
-bot/payments/
-├── base.py          # ABC + dataclasses (InvoiceResult, WebhookEvent, PaymentStatus)
-├── registry.py      # build_registry() — собирает провайдеров из настроек
-├── fulfillment.py   # fulfill_paid_order() — идемпотентная выдача
-├── stars.py         # Telegram Stars (XTR)
-├── cryptobot.py     # CryptoBot Crypto Pay API
-└── lava.py          # Lava.ru Business API
-
-bot/webhook.py       # aiohttp /payments/<code> для каждой платёжки
-```
-
-Заказ хранит `(provider, external_id)` — по этому ключу ищется при
-вебхуке и при ручной проверке. `fulfill_paid_order` использует
-compare-and-swap UPDATE `status=PENDING_PAYMENT → AWAITING_DELIVERY`,
-поэтому одновременный webhook и нажатие кнопки безопасны: только один
-писатель выигрывает гонку, второй видит `already_done`.
-
-## Масштабирование
-
-- Перейти на Postgres + Redis (`docker compose up`).
-- Запускать несколько воркеров **polling под одним токеном нельзя** —
-  Telegram отдаёт апдейты только одному. Для горизонтального
-  масштабирования переключиться на webhook + reverse proxy.
-- При желании: вынести `ThrottlingMiddleware` в Redis-реализацию
-  (token-bucket), чтобы лимиты были общие между воркерами.
+- `/start` — главное меню (каталог, корзина, заказы, поддержка).
+- `/admin` — админ-панель (по ролям).

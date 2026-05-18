@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,14 +16,11 @@ async def add_stock_items(
 
 
 async def reserve_one(
-    session: AsyncSession, product_id: int, order_id: int
+    session: AsyncSession, product_id: int, order_item_id: int
 ) -> StockItem | None:
-    """Atomically claim one unsold stock row for the given order.
+    """Atomically claim one unsold stock row for the given order item.
 
-    Uses a compare-and-swap UPDATE so two concurrent callers can never be
-    handed the same row — even on SQLite where ``FOR UPDATE`` is a no-op.
-    Bounded retry loop covers the case where another transaction grabs our
-    candidate between SELECT and UPDATE.
+    Compare-and-swap UPDATE — safe on SQLite and Postgres alike.
     """
     for _ in range(32):
         pick = (
@@ -36,19 +35,17 @@ async def reserve_one(
         candidate_id = (await session.execute(pick)).scalar_one_or_none()
         if candidate_id is None:
             return None
-
         claim = (
             update(StockItem)
             .where(
                 StockItem.id == candidate_id,
                 StockItem.is_sold.is_(False),
             )
-            .values(is_sold=True, order_id=order_id)
+            .values(is_sold=True, order_item_id=order_item_id)
             .execution_options(synchronize_session=False)
         )
         result = await session.execute(claim)
         if result.rowcount == 1:
             await session.flush()
             return await session.get(StockItem, candidate_id)
-        # lost the race — try the next candidate
     return None
