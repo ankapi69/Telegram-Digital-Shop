@@ -4,6 +4,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from bot.payments.balance import BalanceProvider
 from bot.payments.base import PaymentProvider
 from bot.payments.cryptobot import CryptoBotProvider
 from bot.payments.lava import LavaProvider
@@ -34,13 +35,17 @@ class PaymentRegistry:
         return self._providers.get(code)
 
     def all(self) -> list[PaymentProvider]:
+        """Public providers — used to build user-facing payment buttons."""
+        return [p for p in self._providers.values() if not p.is_internal]
+
+    def all_including_internal(self) -> list[PaymentProvider]:
         return list(self._providers.values())
 
     def for_product(self, product: "Product") -> list[PaymentProvider]:
         return [
             p
             for p in self._providers.values()
-            if p.price_for(product) is not None
+            if not p.is_internal and p.price_for(product) is not None
         ]
 
     async def aclose(self) -> None:
@@ -53,7 +58,7 @@ class PaymentRegistry:
 
 def build_registry(settings: "Settings") -> PaymentRegistry:
     """Instantiate every provider whose configuration is present."""
-    providers: list[PaymentProvider] = [StarsProvider()]
+    providers: list[PaymentProvider] = [StarsProvider(), BalanceProvider()]
 
     if settings.cryptobot_token:
         providers.append(

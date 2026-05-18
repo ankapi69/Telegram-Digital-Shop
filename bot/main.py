@@ -27,6 +27,7 @@ from bot.services.cache import TTLCache
 from bot.services.cart import CartService
 from bot.services.catalog import CatalogService
 from bot.services.notifier import Notifier
+from bot.services.rates import RatesService
 from bot.services.support import SupportService
 from bot.utils.logging import configure_logging
 from bot.webhook import build_webhook_app, run_webhook_server
@@ -82,6 +83,12 @@ async def run() -> None:
     cart = CartService(redis, ttl=settings.cart_ttl_seconds)
     broadcaster = Broadcaster(bot, rate_per_sec=settings.broadcast_rate_per_sec)
     support = SupportService(bot=bot, group_id=settings.support_group_id, redis=redis)
+    rates = RatesService(
+        sessionmaker,
+        markup_pct=settings.rub_usd_markup,
+        fallback=settings.rub_usd_fallback,
+        refresh_interval=settings.rates_refresh_interval,
+    )
 
     dp = Dispatcher(storage=storage)
     dp["settings"] = settings
@@ -91,6 +98,7 @@ async def run() -> None:
     dp["cart"] = cart
     dp["broadcaster"] = broadcaster
     dp["support"] = support
+    dp["rates"] = rates
 
     dp.update.middleware(ThrottlingMiddleware(rate=settings.throttle_rate))
     dp.update.middleware(DbSessionMiddleware(sessionmaker))
@@ -106,6 +114,8 @@ async def run() -> None:
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
             pass
+
+    rates.start()
 
     webhook_runner = None
     if settings.webhook_enabled:
@@ -134,6 +144,7 @@ async def run() -> None:
             if exc is not None:
                 raise exc
     finally:
+        await rates.stop()
         if webhook_runner is not None:
             await webhook_runner.cleanup()
         await registry.aclose()

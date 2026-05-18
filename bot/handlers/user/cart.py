@@ -11,6 +11,7 @@ from bot.keyboards.user import cart_kb
 from bot.locales import translate
 from bot.payments.registry import PaymentRegistry
 from bot.repositories import product as product_repo
+from bot.repositories import wallet as wallet_repo
 from bot.services.cart import CartLine, CartService
 from bot.services.promo import apply_promo
 from bot.states.admin import CartPromo
@@ -48,7 +49,9 @@ async def _render_cart(
         await target.edit_text(t("cart_empty"), reply_markup=cart_kb([], False, False, []))
         return
 
-    # Compute subtotal in each currency that ALL products support.
+    # Compute subtotal in each currency that ALL products support. Internal
+    # providers (e.g. wallet) are queried separately so the wallet button
+    # only appears when the cart is fully priced in USD.
     currency_totals: dict[str, Decimal] = {}
     for provider in registry.all():
         cur = provider.currency
@@ -66,6 +69,25 @@ async def _render_cart(
             currency_totals[cur] = total
 
     promo_code = await cart.get_promo(user_id)
+
+    # Wallet pay-ability: every product priced in USDT and balance covers total.
+    balance_provider = registry.get("balance")
+    can_pay_balance = False
+    usd_total_after_promo: Decimal | None = None
+    if balance_provider is not None:
+        usd_subtotal = Decimal(0)
+        usd_ok = True
+        for product, qty in products:
+            price = balance_provider.price_for(product)
+            if price is None:
+                usd_ok = False
+                break
+            usd_subtotal += Decimal(price) * qty
+        if usd_ok:
+            promo_for_usd = await apply_promo(session, promo_code, usd_subtotal, "USDT")
+            usd_total_after_promo = promo_for_usd.total_after if promo_for_usd else usd_subtotal
+            balance = await wallet_repo.get_balance(session, user_id)
+            can_pay_balance = balance >= usd_total_after_promo
 
     text_lines = [t("cart_title"), ""]
     for product, qty in products:
@@ -89,11 +111,19 @@ async def _render_cart(
     if not currency_totals:
         text_lines.append(t("no_providers"))
 
+    if usd_total_after_promo is not None:
+        balance = await wallet_repo.get_balance(session, user_id)
+        text_lines.append("")
+        text_lines.append(
+            t("balance_amount", amount=fmt_amount(balance, "USD"))
+        )
+
     markup = cart_kb(
         products,
         has_promo=bool(promo_code),
         can_checkout=bool(currency_totals),
         currencies=list(currency_totals.keys()),
+        can_pay_balance=can_pay_balance,
     )
     text = "\n".join(text_lines)
     if isinstance(cb, CallbackQuery):

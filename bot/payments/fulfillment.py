@@ -10,15 +10,19 @@ from sqlalchemy.orm import selectinload
 
 from bot.database.models import (
     DeliveryType,
+    LedgerKind,
     Order,
     OrderItem,
     OrderItemStatus,
+    OrderKind,
     OrderStatus,
     Product,
 )
 from bot.locales import translate as t
 from bot.repositories import promo as promo_repo
+from bot.repositories import wallet as wallet_repo
 from bot.repositories.stock import reserve_one
+from bot.utils.money import fmt_amount
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -65,6 +69,31 @@ async def fulfill_paid_order(
 
     stmt = select(Order).where(Order.id == order_id).options(selectinload(Order.items))
     order = (await session.execute(stmt)).scalar_one()
+
+    # TOP-UP orders: credit wallet (in USD), mark delivered, notify user.
+    if order.kind == OrderKind.TOPUP:
+        credit_usd = order.credited_amount or order.total_amount
+        await wallet_repo.credit(
+            session,
+            user_id=order.user_id,
+            amount=credit_usd,
+            kind=LedgerKind.TOPUP,
+            ref_order_id=order.id,
+            comment=f"topup via {order.provider}",
+        )
+        order.status = OrderStatus.DELIVERED
+        order.delivered_at = datetime.now(timezone.utc)
+        try:
+            new_balance = await wallet_repo.get_balance(session, order.user_id)
+            await bot.send_message(
+                order.user_id,
+                "✅ Баланс пополнен на "
+                f"<b>{fmt_amount(credit_usd, 'USD')}</b>.\n"
+                f"Текущий баланс: <b>{fmt_amount(new_balance, 'USD')}</b>",
+            )
+        except Exception:
+            logger.exception("topup notify failed for order {}", order.id)
+        return FulfillResult(delivered=1, pending=0, already_done=False)
 
     if order.promo_code:
         await promo_repo.increment_use(session, order.promo_code)
@@ -151,8 +180,6 @@ async def fulfill_paid_order(
 
 
 async def _send_receipt(bot: "Bot", order: Order) -> None:
-    from bot.utils.money import fmt_amount
-
     items_lines = [
         f"• {it.title_snapshot} ×{it.quantity} — "
         f"{fmt_amount(it.unit_price * it.quantity, order.currency)}"

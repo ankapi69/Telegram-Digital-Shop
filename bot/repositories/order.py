@@ -12,6 +12,7 @@ from bot.database.models import (
     Order,
     OrderItem,
     OrderItemStatus,
+    OrderKind,
     OrderStatus,
     Product,
 )
@@ -28,6 +29,7 @@ async def create_order(
     total: Decimal,
     promo_code: str | None,
     items: Iterable[tuple[Product, int, Decimal]],
+    kind: OrderKind = OrderKind.PURCHASE,
 ) -> Order:
     order = Order(
         user_id=user_id,
@@ -38,6 +40,7 @@ async def create_order(
         total_amount=total,
         promo_code=promo_code,
         status=OrderStatus.PENDING_PAYMENT,
+        kind=kind,
     )
     for product, qty, unit_price in items:
         order.items.append(
@@ -48,6 +51,30 @@ async def create_order(
                 unit_price=unit_price,
             )
         )
+    session.add(order)
+    await session.flush()
+    return order
+
+
+async def create_topup_order(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    provider: str,
+    currency: str,
+    amount: Decimal,
+) -> Order:
+    order = Order(
+        user_id=user_id,
+        provider=provider,
+        currency=currency,
+        subtotal_amount=amount,
+        discount_amount=Decimal("0"),
+        total_amount=amount,
+        promo_code=None,
+        status=OrderStatus.PENDING_PAYMENT,
+        kind=OrderKind.TOPUP,
+    )
     session.add(order)
     await session.flush()
     return order

@@ -17,9 +17,11 @@ from bot.payments.registry import PaymentRegistry
 from bot.payments.stars import decode_payload
 from bot.repositories import order as order_repo
 from bot.repositories import product as product_repo
+from bot.repositories import wallet as wallet_repo
 from bot.services.cart import CartService
 from bot.services.checkout import CheckoutError, build_quote, materialize_order
 from bot.services.notifier import Notifier
+from bot.services.wallet import InsufficientFunds, pay_with_balance
 from bot.utils.money import fmt_amount
 
 router = Router(name="checkout")
@@ -197,6 +199,58 @@ async def _create_invoice_and_send(
         ),
     )
     return order
+
+
+# ---- Pay from wallet -----------------------------------------------------
+
+
+@router.callback_query(F.data == "paybal")
+async def pay_from_balance(
+    cb: CallbackQuery,
+    session: AsyncSession,
+    bot: Bot,
+    cart: CartService,
+    registry: PaymentRegistry,
+    notifier: Notifier,
+    t=translate,
+) -> None:
+    if cb.from_user is None or cb.message is None:
+        await cb.answer()
+        return
+    balance_provider = registry.get("balance")
+    if balance_provider is None:
+        await cb.answer(t("invoice_provider_off"), show_alert=True)
+        return
+    lines = await cart.get(cb.from_user.id)
+    if not lines:
+        await cb.answer(t("cart_empty"), show_alert=True)
+        return
+    promo_code = await cart.get_promo(cb.from_user.id)
+    try:
+        quote = await build_quote(
+            session, provider=balance_provider,
+            cart_lines=lines, promo_code=promo_code,
+        )
+    except CheckoutError as e:
+        await cb.answer(str(e), show_alert=True)
+        return
+
+    try:
+        result = await pay_with_balance(session, user_id=cb.from_user.id, quote=quote)
+    except InsufficientFunds:
+        await cb.answer(t("balance_insufficient"), show_alert=True)
+        return
+    except CheckoutError as e:
+        await cb.answer(str(e), show_alert=True)
+        return
+
+    await fulfill_paid_order(session, bot, notifier, result.order.id)
+    await cart.clear(cb.from_user.id)
+
+    await cb.message.answer(
+        t("balance_paid", amount=fmt_amount(result.new_balance, "USD"))
+    )
+    await cb.answer()
 
 
 # ---- Manual check ---------------------------------------------------------

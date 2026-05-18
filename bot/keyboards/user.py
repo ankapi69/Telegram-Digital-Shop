@@ -10,14 +10,30 @@ from bot.payments.base import PaymentProvider
 from bot.utils.money import fmt_amount
 
 
-def main_menu_kb(cart_count: int = 0) -> InlineKeyboardMarkup:
+def main_menu_kb(cart_count: int = 0, balance: Decimal | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🛍 Каталог", callback_data="catalog")
     cart_label = f"🧺 Корзина ({cart_count})" if cart_count else "🧺 Корзина"
     kb.button(text=cart_label, callback_data="cart")
+    balance_label = (
+        f"💰 Баланс: {fmt_amount(balance, 'USD')}"
+        if balance is not None and balance > 0
+        else "💰 Баланс"
+    )
+    kb.button(text=balance_label, callback_data="balance")
     kb.button(text="📦 Мои заказы", callback_data="orders:1")
     kb.button(text="🆘 Поддержка", callback_data="support")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def balance_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for amount in (5, 10, 25, 50, 100):
+        kb.button(text=f"+ ${amount}", callback_data=f"topup:{amount}")
+    kb.button(text="✏️ Другая сумма", callback_data="topup:custom")
+    kb.button(text="« В меню", callback_data="back_to_menu")
+    kb.adjust(3, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -67,6 +83,7 @@ def cart_kb(
     has_promo: bool,
     can_checkout: bool,
     currencies: list[str],
+    can_pay_balance: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for product, qty in lines:
@@ -86,9 +103,12 @@ def cart_kb(
                 callback_data="cart:promo",
             ),
         )
+        if can_pay_balance:
+            kb.button(text="💰 Оплатить с баланса", callback_data="paybal")
         if can_checkout:
             for currency in currencies:
-                kb.button(text=f"💳 Оформить ({currency})", callback_data=f"checkout:{currency}")
+                label = "💳 Оформить ($)" if currency in ("USDT", "USD") else f"💳 Оформить ({currency})"
+                kb.button(text=label, callback_data=f"checkout:{currency}")
     kb.button(text="« В меню", callback_data="back_to_menu")
     kb.adjust(1)
     return kb.as_markup()

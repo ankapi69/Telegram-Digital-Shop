@@ -59,3 +59,13 @@ class CartPromo(StatesGroup):
 
 class Support(StatesGroup):
     waiting_message = State()
+
+
+class AdminBalanceAdjust(StatesGroup):
+    target = State()         # used by the standalone "by ID" entry-point
+    amount = State()
+    comment = State()
+
+
+class AdminUserSearchForBalance(StatesGroup):
+    query = State()

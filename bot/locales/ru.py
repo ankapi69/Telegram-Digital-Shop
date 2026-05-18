@@ -85,7 +85,27 @@ STRINGS: dict[str, str] = {
     "support_reply_help": "Ответьте на пересланное сообщение — текст пойдёт пользователю.",
     "support_reply_ok": "Доставлено",
     "support_reply_fail": "Не удалось отправить пользователю.",
+    # Balance
+    "balance_title": "💰 <b>Баланс</b>",
+    "balance_amount": "На балансе: <b>{amount}</b>",
+    "balance_empty": "На балансе: <b>{amount}</b>\n\nПополните, чтобы покупать в один клик.",
+    "balance_topup_prompt": "Введите сумму пополнения в долларах (например, 7.50):",
+    "balance_topup_invalid": "Нужно положительное число, от $1 до $5000.",
+    "balance_topup_no_provider": "Пополнение временно недоступно — CryptoBot не настроен.",
+    "balance_topup_created": (
+        "🧾 Счёт на пополнение #{order_id} на <b>{amount}</b>.\n"
+        "Откройте ссылку и оплатите, затем нажмите «Проверить оплату»."
+    ),
+    "balance_paid": "✅ Оплачено с баланса. Текущий баланс: <b>{amount}</b>",
+    "balance_insufficient": "Недостаточно средств на балансе",
+    "balance_history_header": "Последние операции:",
+    "balance_history_empty": "Операций ещё не было.",
     # Admin
     "admin_menu": "🛠 <b>Админ-панель</b>",
     "admin_no_access": "Нет доступа",
+    "admin_balance_prompt": "Введите изменение баланса в $ (положительное — начислить, отрицательное — снять):",
+    "admin_balance_invalid": "Нужно ненулевое число (например, 10 или -5).",
+    "admin_balance_comment": "Комментарий (или «-»):",
+    "admin_balance_insufficient": "У пользователя недостаточно средств для списания.",
+    "admin_balance_done": "✅ Готово. Новый баланс: <b>{amount}</b>",
 }

@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     cart_ttl_seconds: int = 86_400
     broadcast_rate_per_sec: int = 25
 
+    # Exchange rate (used when topping up balance via RUB providers).
+    # Pulled from CoinGecko once per ``rates_refresh_interval`` seconds and
+    # multiplied by ``(1 + markup/100)``. Admin can pin a manual rate that
+    # overrides the live value.
+    rub_usd_markup: float = 3.0
+    rub_usd_fallback: float = 95.0
+    rates_refresh_interval: int = 3600
+
     # Webhook server
     webhook_enabled: bool = False
     webhook_host: str = "0.0.0.0"

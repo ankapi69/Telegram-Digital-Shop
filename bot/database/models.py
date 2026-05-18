@@ -43,6 +43,18 @@ class OrderItemStatus(str, enum.Enum):
     DELIVERED = "delivered"
 
 
+class OrderKind(str, enum.Enum):
+    PURCHASE = "purchase"
+    TOPUP = "topup"
+
+
+class LedgerKind(str, enum.Enum):
+    TOPUP = "topup"
+    PURCHASE = "purchase"
+    REFUND = "refund"
+    ADMIN_ADJUST = "admin_adjust"
+
+
 class PromoType(str, enum.Enum):
     PERCENT = "percent"
     FIXED = "fixed"
@@ -197,6 +209,14 @@ class Order(Base):
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, native_enum=False, length=32), nullable=False
     )
+    kind: Mapped[OrderKind] = mapped_column(
+        Enum(OrderKind, native_enum=False, length=16),
+        default=OrderKind.PURCHASE,
+        nullable=False,
+    )
+    # For TOPUP orders priced in non-USD currency (Lava in RUB): how much
+    # USD will be credited to the wallet on successful payment.
+    credited_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -239,3 +259,51 @@ class OrderItem(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     order: Mapped[Order] = relationship(back_populates="items")
+
+
+class Wallet(Base):
+    __tablename__ = "wallets"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    balance: Mapped[Decimal] = mapped_column(
+        Numeric(20, 2), default=Decimal("0"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(256), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class LedgerEntry(Base):
+    __tablename__ = "ledger_entries"
+
+    # Integer PK so SQLite gets a working autoincrement; on Postgres
+    # this is still 32-bit but ledger volume in a typical shop never
+    # gets close.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    delta: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    kind: Mapped[LedgerKind] = mapped_column(
+        Enum(LedgerKind, native_enum=False, length=16), nullable=False
+    )
+    ref_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("orders.id", ondelete="SET NULL")
+    )
+    ref_admin_id: Mapped[int | None] = mapped_column(BigInteger)
+    comment: Mapped[str | None] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )

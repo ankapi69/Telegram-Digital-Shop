@@ -67,6 +67,9 @@ class PaymentProvider(ABC):
     display_name: ClassVar[str]
     supports_webhook: ClassVar[bool] = True
     supports_manual_check: ClassVar[bool] = True
+    # Internal providers (e.g. wallet) don't appear in the buyer's
+    # provider button list and aren't offered as a checkout option.
+    is_internal: ClassVar[bool] = False
     # ``currency`` may be set as a class attribute on subclasses with a
     # fixed currency (Stars=XTR, Lava=RUB) or as an instance attribute on
     # subclasses where it depends on configuration (CryptoBot asset).

@@ -27,6 +27,9 @@ def admin_menu_kb(role: UserRole) -> InlineKeyboardMarkup:
         kb.button(text="🏷 Промокоды", callback_data="adm:promo:list")
         kb.button(text="📊 Статистика", callback_data="adm:stats")
         kb.button(text="📣 Рассылка", callback_data="adm:bcast")
+        kb.button(text="📈 Курс RUB/USD", callback_data="adm:rate")
+    if role in (UserRole.MANAGER, UserRole.SUPERADMIN):
+        kb.button(text="💰 Балансы", callback_data="adm:bal")
     if role in (UserRole.SUPPORT, UserRole.MANAGER, UserRole.SUPERADMIN):
         kb.button(text="👤 Пользователи", callback_data="adm:users")
     kb.adjust(1)
@@ -183,6 +186,7 @@ def users_list_kb(users: list[User]) -> InlineKeyboardMarkup:
 
 def user_card_kb(user: User) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="💰 Изменить баланс", callback_data=f"adm:bal:edit:{user.id}")
     if user.is_banned:
         kb.button(text="✅ Разблокировать", callback_data=f"adm:u:unban:{user.id}")
     else:
